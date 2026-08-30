@@ -1,0 +1,1 @@
+"""Agrobot weather alerts service."""

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agrobot
+          POSTGRES_PASSWORD: agrobot
+          POSTGRES_DB: agrobot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agrobot -d agrobot_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      DATABASE_URL: postgresql+asyncpg://agrobot:agrobot@localhost:5432/agrobot_test
+      TEST_DATABASE_URL: postgresql+asyncpg://agrobot:agrobot@localhost:5432/agrobot_test
+      INTERNAL_API_TOKEN: test-internal-token-123
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.30"
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check .
+      - run: uv run alembic upgrade head
+      - run: uv run pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm test
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+      - run: make smoke
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose logs --tail=200 redis celery-beat celery-worker api
+      - name: Clean smoke environment
+        if: always()
+        run: docker compose down -v --remove-orphans

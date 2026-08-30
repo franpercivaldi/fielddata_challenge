@@ -1,0 +1,155 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agrobot
+      POSTGRES_PASSWORD: agrobot
+      POSTGRES_DB: agrobot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agrobot -d agrobot"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory-policy", "noeviction"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    build: .
+    command: sh -c "alembic upgrade head && python -m app.demo_seed"
+    environment: &service-env
+      DATABASE_URL: postgresql+asyncpg://agrobot:agrobot@db:5432/agrobot
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-development-token}
+      CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/0}
+      WORKER_INTERVAL_SECONDS: ${WORKER_INTERVAL_SECONDS:-10}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT_SECONDS: ${DB_POOL_TIMEOUT_SECONDS:-5}
+      DB_COMMAND_TIMEOUT_SECONDS: ${DB_COMMAND_TIMEOUT_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: '["http://localhost:3000"]'
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    environment: *service-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    stop_grace_period: 30s
+
+  celery-worker:
+    build: .
+    command:
+      - celery
+      - -A
+      - app.celery_app.celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=alert-evaluation
+      - --concurrency=2
+      - --hostname=celery@%h
+    environment: *service-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.celery_app.celery_app inspect ping --destination celery@$$HOSTNAME --timeout 2 | grep -q pong"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  celery-beat:
+    build: .
+    command:
+      - celery
+      - -A
+      - app.celery_app.celery_app
+      - beat
+      - --loglevel=INFO
+      - --pidfile=/tmp/celerybeat.pid
+      - --schedule=/tmp/celerybeat-schedule
+    environment: *service-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tmp/celerybeat.pid && kill -0 $$(cat /tmp/celerybeat.pid)"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000').then(r => { if (!r.ok) process.exit(1) })"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    stop_grace_period: 30s
+
+  test-db:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_USER: agrobot
+      POSTGRES_PASSWORD: agrobot
+      POSTGRES_DB: agrobot_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agrobot -d agrobot_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  test:
+    build:
+      context: .
+      target: test
+    profiles: ["test"]
+    command: sh -c "alembic upgrade head && pytest -q"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://agrobot:agrobot@test-db:5432/agrobot_test
+      TEST_DATABASE_URL: postgresql+asyncpg://agrobot:agrobot@test-db:5432/agrobot_test
+      INTERNAL_API_TOKEN: test-internal-token-123
+    depends_on:
+      test-db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
