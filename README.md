@@ -4,9 +4,6 @@ Aplicación web y backend para configurar alertas por campo y generar notificaci
 pronósticos meteorológicos ya almacenados. La solución prioriza idempotencia, concurrencia y una
 separación clara entre la interfaz, la API y el trabajo en segundo plano.
 
-> Para entender el sistema desde cero y preparar su defensa técnica, consultar la
-> [Guía de estudio para la entrevista](docs/GUIA_ENTREVISTA.md).
-
 ## Arquitectura
 
 ```text
